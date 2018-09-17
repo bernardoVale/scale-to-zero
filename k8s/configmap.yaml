@@ -1,0 +1,18 @@
+apiVersion: v1
+data:
+  enable-vts-status: "true"
+  custom-http-errors: "404"
+kind: ConfigMap
+metadata:
+  creationTimestamp: 2018-09-17T20:32:03Z
+  labels:
+    app: nginx-ingress
+    chart: nginx-ingress-0.28.2
+    component: controller
+    heritage: Tiller
+    release: ingress
+  name: ingress-nginx-ingress-controller
+  namespace: default
+  resourceVersion: "225738"
+  selfLink: /api/v1/namespaces/default/configmaps/ingress-nginx-ingress-controller
+  uid: bc92bec4-bab8-11e8-a74d-025000000001
