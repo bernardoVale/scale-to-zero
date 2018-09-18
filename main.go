@@ -46,15 +46,11 @@ type Getter interface {
 }
 
 func main() {
-	errFilesPath := "/www"
-	if os.Getenv(ErrFilesPathVar) != "" {
-		errFilesPath = os.Getenv(ErrFilesPathVar)
-	}
 
 	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Addr:     "redis-master.default.svc.cluster.local:6379",
+		Password: "npCYPR7uAt", // no password set
+		DB:       0,            // use default DB
 	})
 
 	http.HandleFunc("/", errorHandler(client))
@@ -84,14 +80,6 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 			log.Printf("IngressName: %s", r.Header.Get(IngressName))
 			log.Printf("ServiceName: %s", r.Header.Get(ServiceName))
 			log.Printf("ServicePort: %s", r.Header.Get(ServicePort))
-			// w.Header().Set(FormatHeader)
-			// w.Header().Set(CodeHeader)
-			// w.Header().Set(ContentType, r.Header.Get(ContentType))
-			// w.Header().Set(OriginalURI, r.Header.Get(OriginalURI))
-			// w.Header().Set(Namespace, r.Header.Get(Namespace))
-			// w.Header().Set(IngressName, r.Header.Get(IngressName))
-			// w.Header().Set(ServiceName, r.Header.Get(ServiceName))
-			// w.Header().Set(ServicePort, r.Header.Get(ServicePort))
 		}
 
 		format := r.Header.Get(FormatHeader)
@@ -111,15 +99,33 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 		w.Header().Set(ContentType, format)
 
 		if ingressName != "" {
-			_, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
-			if err == redis.Nil {
-				log.Println("App is not sleeping")
-			} else if err != nil {
-				panic(err)
+			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
+			if err != nil {
+				if err != redis.Nil {
+					panic(err)
+				}
+				fmt.Fprint(w, "App is sleeping but we didn't know =/")
+				return
 			}
-			fmt.Fprintf(w, "App %s is sleeping!", r.Header.Get(IngressName))
+			switch val {
+			case "sleeping":
+				fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
+				client.Publish("wakeup", fmt.Sprintf("%s/%s", namespace, ingressName)).Err()
+				if err != nil {
+					panic(err)
+				}
+				if err := client.Set(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName), "waking_up", 0).Err(); err != nil {
+					panic(err)
+				}
+			case "waking_up":
+				fmt.Fprintf(w, "App %s is waking up. Wait a little bit more. It might take a few minutes...", r.Header.Get(IngressName))
+			case "awake":
+				fmt.Fprintf(w, "App %s is awake, but for some reason you end up here. The app is probably facing some issues.\n", ingressName)
+			default:
+				fmt.Fprintf(w, "Page not found - 404")
+			}
 			return
 		}
-		fmt.Fprint(w, "Page not found - 404")
+		fmt.Fprintf(w, "Page not found - 404")
 	}
 }
