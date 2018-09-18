@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"mime"
@@ -45,11 +46,16 @@ type Getter interface {
 	Get(key string) *struct{}
 }
 
+type ErrorStruct struct {
+	message string
+	error   string
+}
+
 func main() {
 
 	client := redis.NewClient(&redis.Options{
 		Addr:     "redis-master.default.svc.cluster.local:6379",
-		Password: "npCYPR7uAt", // no password set
+		Password: "rKOsaUDIRK", // no password set
 		DB:       0,            // use default DB
 	})
 
@@ -57,11 +63,23 @@ func main() {
 
 	// http.Handle("/metrics", promhttp.Handler())
 
+	http.HandleFunc("/error", backendError())
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
 	http.ListenAndServe(fmt.Sprintf(":8080"), nil)
+}
+
+func backendError() func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Print("Handling error")
+		data := ErrorStruct{message: "foo", error: "backend error"}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(data)
+	}
 }
 
 func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request) {
@@ -99,6 +117,18 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 		w.Header().Set(ContentType, format)
 
 		if ingressName != "" {
+			// err := json.NewDecoder(r.Body).Decode(input)
+			// switch {
+			// case err == io.EOF:
+			// 	log.Println("No body =/")
+			// case err != nil:
+			// 	b, err := ioutil.ReadAll(r.Body)
+			// 	if err != nil {
+			// 		panic(err)
+			// 	}
+			// 	log.Printf("Data %s", b)
+			// }
+			// return
 			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
 			if err != nil {
 				if err != redis.Nil {
