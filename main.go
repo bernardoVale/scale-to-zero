@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"mime"
 	"net/http"
-	"os"
+	"strings"
 
 	"github.com/go-redis/redis"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
+
+var wakeupChannel, sleepChannel chan string
 
 const (
 	// FormatHeader name of the header used to extract the format
@@ -51,26 +54,107 @@ type ErrorStruct struct {
 	error   string
 }
 
+func wakeupApp(message <-chan string, client *redis.Client, kubeClient *kubernetes.Clientset) {
+	app := <-message
+	log.Println("Wakeup signal for", app)
+	appQualifiedName := strings.Split(app, "/")
+	namespace := appQualifiedName[0]
+	ingressName := appQualifiedName[1]
+	if err := client.Set(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName), "waking_up", 0).Err(); err != nil {
+		panic(err)
+	}
+	deploymentsClient := kubeClient.AppsV1().Deployments(namespace)
+	deployment, err := deploymentsClient.Get(ingressName, metav1.GetOptions{})
+	must(err)
+
+	log.Printf("Scaling app %s back to 1 replicas", ingressName)
+	deployment.Spec.Replicas = int32Ptr(1)
+	_, err = deploymentsClient.Update(deployment)
+	must(err)
+	if err := client.Set(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName), "awake", 0).Err(); err != nil {
+		panic(err)
+	}
+	return
+}
+
+func putItToSleep(message <-chan string, client *redis.Client, kubeClient *kubernetes.Clientset) {
+	app := <-message
+	log.Println("Sleep signal received for", app)
+	appQualifiedName := strings.Split(app, "/")
+	namespace := appQualifiedName[0]
+	ingressName := appQualifiedName[1]
+	deploymentsClient := kubeClient.AppsV1().Deployments(namespace)
+	deployment, err := deploymentsClient.Get(ingressName, metav1.GetOptions{})
+	must(err)
+
+	log.Printf("Puting app %s to sleep", ingressName)
+	deployment.Spec.Replicas = int32Ptr(0)
+	_, err = deploymentsClient.Update(deployment)
+	must(err)
+
+	log.Println("Registering sleep state for app ", app)
+	err = client.Set(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName), "sleeping", 0).Err()
+	must(err)
+	return
+}
+
 func main() {
 
 	client := redis.NewClient(&redis.Options{
-		Addr:     "redis-master.default.svc.cluster.local:6379",
-		Password: "rKOsaUDIRK", // no password set
+		Addr: "127.0.0.1:6379",
+		// Addr:     "redis-master.default.svc.cluster.local:6379",
+		Password: "npCYPR7uAt", // no password set
 		DB:       0,            // use default DB
 	})
+	wakeupChannel = make(chan string)
+	sleepChannel = make(chan string)
+
+	// log.Info("Retriving Kubernetes client")
+	clientSet := mustAuthenticate()
 
 	http.HandleFunc("/", errorHandler(client))
+
+	log.Println("Registering wakeup goroutine")
+	go wakeupApp(wakeupChannel, client, clientSet)
+	log.Println("Registering sleep goroutine")
+	go putItToSleep(sleepChannel, client, clientSet)
 
 	// http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/error", backendError())
+	http.HandleFunc("/wakeup", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Received wakeup call for grafana")
+		wakeupChannel <- "default/grafana"
+	})
+	http.HandleFunc("/sleep", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Received sleep call for grafana")
+		sleepChannel <- "default/grafana"
+	})
+	// http.HandleFunc("/404", fourOhFour())
+	// http.HandleFunc("/502", code502())
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
 	http.ListenAndServe(fmt.Sprintf(":8080"), nil)
+	close(wakeupChannel)
 }
+
+// func fourOhFour() func(http.ResponseWriter, *http.Request) {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		log.Print("Handling 404")
+// 		w.WriteHeader(http.StatusNotFound)
+// 		fmt.Fprintf(w, "Not Found")
+// 	}
+// }
+// func code502() func(http.ResponseWriter, *http.Request) {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		log.Print("Handling 502")
+// 		w.WriteHeader(http.StatusBadGateway)
+// 		fmt.Fprintf(w, "502 code")
+// 	}
+// }
 
 func backendError() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -84,51 +168,39 @@ func backendError() func(http.ResponseWriter, *http.Request) {
 
 func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ext := "html"
+		// ext := "html"
 
 		ingressName := r.Header.Get(IngressName)
 		namespace := r.Header.Get(Namespace)
 
-		if os.Getenv("DEBUG") != "" {
-			log.Printf("FormatHeader: %s", r.Header.Get(FormatHeader))
-			log.Printf("CodeHeader: %s", r.Header.Get(CodeHeader))
-			log.Printf("ContentType: %s", r.Header.Get(ContentType))
-			log.Printf("OriginalURI: %s", r.Header.Get(OriginalURI))
-			log.Printf("Namespace: %s", r.Header.Get(Namespace))
-			log.Printf("IngressName: %s", r.Header.Get(IngressName))
-			log.Printf("ServiceName: %s", r.Header.Get(ServiceName))
-			log.Printf("ServicePort: %s", r.Header.Get(ServicePort))
-		}
+		// if os.Getenv("DEBUG") != "" {
+		// 	log.Printf("FormatHeader: %s", r.Header.Get(FormatHeader))
+		// 	log.Printf("CodeHeader: %s", r.Header.Get(CodeHeader))
+		// 	log.Printf("ContentType: %s", r.Header.Get(ContentType))
+		// 	log.Printf("OriginalURI: %s", r.Header.Get(OriginalURI))
+		// 	log.Printf("Namespace: %s", r.Header.Get(Namespace))
+		// 	log.Printf("IngressName: %s", r.Header.Get(IngressName))
+		// 	log.Printf("ServiceName: %s", r.Header.Get(ServiceName))
+		// 	log.Printf("ServicePort: %s", r.Header.Get(ServicePort))
+		// }
 
-		format := r.Header.Get(FormatHeader)
-		if format == "" {
-			format = "text/html"
-			log.Printf("format not specified. Using %v", format)
-		}
+		// format := r.Header.Get(FormatHeader)
+		// if format == "" {
+		// 	format = "text/html"
+		// 	log.Printf("format not specified. Using %v", format)
+		// }
 
-		cext, err := mime.ExtensionsByType(format)
-		if err != nil {
-			log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
-		} else if len(cext) == 0 {
-			log.Printf("couldn't get media type extension. Using %v", ext)
-		} else {
-			ext = cext[0]
-		}
-		w.Header().Set(ContentType, format)
+		// cext, err := mime.ExtensionsByType(format)
+		// if err != nil {
+		// 	log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
+		// } else if len(cext) == 0 {
+		// 	log.Printf("couldn't get media type extension. Using %v", ext)
+		// } else {
+		// 	ext = cext[0]
+		// }
+		// w.Header().Set(ContentType, format)
 
 		if ingressName != "" {
-			// err := json.NewDecoder(r.Body).Decode(input)
-			// switch {
-			// case err == io.EOF:
-			// 	log.Println("No body =/")
-			// case err != nil:
-			// 	b, err := ioutil.ReadAll(r.Body)
-			// 	if err != nil {
-			// 		panic(err)
-			// 	}
-			// 	log.Printf("Data %s", b)
-			// }
-			// return
 			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
 			if err != nil {
 				if err != redis.Nil {
@@ -140,13 +212,7 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 			switch val {
 			case "sleeping":
 				fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
-				client.Publish("wakeup", fmt.Sprintf("%s/%s", namespace, ingressName)).Err()
-				if err != nil {
-					panic(err)
-				}
-				if err := client.Set(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName), "waking_up", 0).Err(); err != nil {
-					panic(err)
-				}
+				wakeupChannel <- fmt.Sprintf("%s/%s", namespace, ingressName)
 			case "waking_up":
 				fmt.Fprintf(w, "App %s is waking up. Wait a little bit more. It might take a few minutes...", r.Header.Get(IngressName))
 			case "awake":
@@ -156,6 +222,15 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 			}
 			return
 		}
+		// Not collected by custom error
 		fmt.Fprintf(w, "Page not found - 404")
 	}
 }
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+func int32Ptr(i int32) *int32 { return &i }

@@ -290,8 +290,10 @@ defaultBackend:
 
   name: default-backend
   image:
-    repository: scale-to-zero
-    tag: latest
+    repository: k8s.gcr.io/defaultbackend
+    tag: "1.4"
+    # repository: scale-to-zero
+    # tag: latest
     pullPolicy: IfNotPresent
 
   extraArgs: {}
