@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 
@@ -42,12 +43,16 @@ const (
 
 func main() {
 
+	backendHost := flag.String("host", "127.0.0.1:6379", "backend host url")
+	backendPassword := flag.String("password", "npCYPR7uAt", "backend password")
+
+	flag.Parse()
+
 	logrus.Info("Starting default backend")
 	client := redis.NewClient(&redis.Options{
-		Addr: "127.0.0.1:6379",
-		// Addr:     "redis-master.default.svc.cluster.local:6379",
-		Password: "rKOsaUDIRK", // no password set
-		DB:       0,            // use default DB
+		Addr:     *backendHost,
+		Password: *backendPassword,
+		DB:       0, // use default DB
 	})
 	http.HandleFunc("/", errorHandler(client))
 
