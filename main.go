@@ -46,7 +46,7 @@ func main() {
 	client := redis.NewClient(&redis.Options{
 		Addr: "127.0.0.1:6379",
 		// Addr:     "redis-master.default.svc.cluster.local:6379",
-		Password: "npCYPR7uAt", // no password set
+		Password: "rKOsaUDIRK", // no password set
 		DB:       0,            // use default DB
 	})
 	http.HandleFunc("/", errorHandler(client))
@@ -111,6 +111,8 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 					logrus.Errorf("Failed to publish wakeup message: %v", err)
 				}
 				fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
+			case "waking_up":
+				fmt.Fprintf(w, "App %s is waking up. It might take a few minutes...", r.Header.Get(IngressName))
 			default:
 				fmt.Fprintf(w, "Page not found - 404")
 			}
