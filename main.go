@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-redis/redis"
 	"github.com/sirupsen/logrus"
@@ -43,7 +44,7 @@ const (
 
 func main() {
 
-	backendHost := flag.String("host", "127.0.0.1:6379", "backend host url")
+	backendHost := flag.String("host", "redis-master:6379", "backend host url")
 	backendPassword := flag.String("password", "npCYPR7uAt", "backend password")
 
 	flag.Parse()
@@ -62,6 +63,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	logrus.Info("Starting app with time sleep")
 	http.ListenAndServe(fmt.Sprintf(":8080"), nil)
 	close(wakeupChannel)
 }
@@ -115,9 +117,17 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 				if err != nil {
 					logrus.Errorf("Failed to publish wakeup message: %v", err)
 				}
-				fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
+				// fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
+				logrus.Info("Sleeping for 35 seconds")
+				time.Sleep(time.Second * 7)
+				logrus.Info("Redirecting request")
+				http.Redirect(w, r, "http://backend.local/", http.StatusSeeOther)
 			case "waking_up":
-				fmt.Fprintf(w, "App %s is waking up. It might take a few minutes...", r.Header.Get(IngressName))
+				// fmt.Fprintf(w, "App %s is waking up. It might take a few minutes...", r.Header.Get(IngressName))
+				logrus.Info("Sleeping for 1 minutes")
+				time.Sleep(time.Minute * 1)
+				logrus.Info("Redirecting request waking_up")
+				http.Redirect(w, r, "http://backend.local/", http.StatusSeeOther)
 			default:
 				fmt.Fprintf(w, "Page not found - 404")
 			}
