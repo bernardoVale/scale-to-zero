@@ -55,6 +55,7 @@ func main() {
 		Password: *backendPassword,
 		DB:       0, // use default DB
 	})
+
 	http.HandleFunc("/", errorHandler(client))
 
 	// http.Handle("/metrics", promhttp.Handler())
@@ -68,35 +69,60 @@ func main() {
 	close(wakeupChannel)
 }
 
+func waitForIt(client *redis.Client, namespace, ingress string) bool {
+	logrus.Infof("Waiting for awake state of app %s/%s", namespace, ingress)
+	timeout := time.After(15 * time.Minute)
+	tick := time.Tick(time.Second * 2)
+	for {
+		select {
+		case <-tick:
+			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingress)).Result()
+			if err != nil {
+				logrus.WithError(err).Errorf("Failed to get app status: %v", err)
+			}
+			if val == "awake" {
+				return true
+			}
+		case <-timeout:
+			return false
+		}
+	}
+}
+
 func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// ext := "html"
 
 		ingressName := r.Header.Get(IngressName)
 		namespace := r.Header.Get(Namespace)
+		redirectTo := r.Header.Get(OriginalURI)
+		redirectRequest := false
 
+		// logrus.Infof("Redirect to: %s", redirectTo)
+		// logrus.Infof("FormatHeader: %s", r.Header.Get(FormatHeader))
+		// logrus.Infof("CodeHeader: %s", r.Header.Get(CodeHeader))
+		// logrus.Infof("ContentType: %s", r.Header.Get(ContentType))
+		// logrus.Infof("OriginalURI: %s", r.Header.Get(OriginalURI))
+		// logrus.Infof("Namespace: %s", r.Header.Get(Namespace))
+		// logrus.Infof("IngressName: %s", r.Header.Get(IngressName))
+		// logrus.Infof("ServiceName: %s", r.Header.Get(ServiceName))
+		// logrus.Infof("ServicePort: %s", r.Header.Get(ServicePort))
+		// logrus.Infof("Req: %s%s\n", r.Host, r.URL.Path)
 		// if os.Getenv("DEBUG") != "" {
-		// 	log.Printf("FormatHeader: %s", r.Header.Get(FormatHeader))
-		// 	log.Printf("CodeHeader: %s", r.Header.Get(CodeHeader))
-		// 	log.Printf("ContentType: %s", r.Header.Get(ContentType))
-		// 	log.Printf("OriginalURI: %s", r.Header.Get(OriginalURI))
-		// 	log.Printf("Namespace: %s", r.Header.Get(Namespace))
-		// 	log.Printf("IngressName: %s", r.Header.Get(IngressName))
-		// 	log.Printf("ServiceName: %s", r.Header.Get(ServiceName))
-		// 	log.Printf("ServicePort: %s", r.Header.Get(ServicePort))
+
 		// }
 
 		// format := r.Header.Get(FormatHeader)
 		// if format == "" {
 		// 	format = "text/html"
-		// 	log.Printf("format not specified. Using %v", format)
+		// 	logrus.Infof("format not specified. Using %v", format)
 		// }
 
 		// cext, err := mime.ExtensionsByType(format)
 		// if err != nil {
-		// 	log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
+		// 	logrus.Infof("unexpected error reading media type extension: %v. Using %v", err, ext)
 		// } else if len(cext) == 0 {
-		// 	log.Printf("couldn't get media type extension. Using %v", ext)
+		// 	logrus.Infof("couldn't get media type extension. Using %v", ext)
 		// } else {
 		// 	ext = cext[0]
 		// }
@@ -117,21 +143,19 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 				if err != nil {
 					logrus.Errorf("Failed to publish wakeup message: %v", err)
 				}
+				redirectRequest = waitForIt(client, namespace, ingressName)
 				// fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
-				logrus.Info("Sleeping for 35 seconds")
-				time.Sleep(time.Second * 7)
-				logrus.Info("Redirecting request")
-				http.Redirect(w, r, "http://backend.local/", http.StatusSeeOther)
 			case "waking_up":
-				// fmt.Fprintf(w, "App %s is waking up. It might take a few minutes...", r.Header.Get(IngressName))
-				logrus.Info("Sleeping for 1 minutes")
-				time.Sleep(time.Minute * 1)
-				logrus.Info("Redirecting request waking_up")
-				http.Redirect(w, r, "http://backend.local/", http.StatusSeeOther)
+				redirectRequest = waitForIt(client, namespace, ingressName)
+			case "awake":
+				redirectRequest = true
 			default:
 				fmt.Fprintf(w, "Page not found - 404")
 			}
-			return
+			if redirectRequest {
+				logrus.Info("Redirecting request")
+				http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+			}
 		}
 		// Not collected by custom error
 		fmt.Fprintf(w, "Page not found - 404")
