@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis"
+	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -40,12 +41,20 @@ const (
 	// ErrFilesPathVar is the name of the environment variable indicating
 	// the location on disk of files served by the handler.
 	ErrFilesPathVar = "ERROR_FILES_PATH"
+
+	// ServiceName name of the header that contains the host directive in the Ingress
+	HostName = "X-Hostname"
+
+	// Schema name of the header that contains the request schema
+	Schema = "X-Schema"
 )
 
 func main() {
 
 	backendHost := flag.String("host", "redis-master:6379", "backend host url")
 	backendPassword := flag.String("password", "npCYPR7uAt", "backend password")
+
+	await := make(map[string]chan bool)
 
 	flag.Parse()
 
@@ -56,7 +65,7 @@ func main() {
 		DB:       0, // use default DB
 	})
 
-	http.HandleFunc("/", errorHandler(client))
+	http.HandleFunc("/", errorHandler(client, await))
 
 	// http.Handle("/metrics", promhttp.Handler())
 
@@ -69,7 +78,7 @@ func main() {
 	close(wakeupChannel)
 }
 
-func waitForIt(client *redis.Client, namespace, ingress string) bool {
+func waitForIt(client *redis.Client, namespace, ingress string, dontRedirect chan<- bool) bool {
 	logrus.Infof("Waiting for awake state of app %s/%s", namespace, ingress)
 	timeout := time.After(15 * time.Minute)
 	tick := time.Tick(time.Second * 2)
@@ -81,53 +90,34 @@ func waitForIt(client *redis.Client, namespace, ingress string) bool {
 				logrus.WithError(err).Errorf("Failed to get app status: %v", err)
 			}
 			if val == "awake" {
+				dontRedirect <- false
+				close(dontRedirect)
 				return true
 			}
 		case <-timeout:
+			logrus.Infof("Timeout while waiting for app %s/%s", namespace, ingress)
+			dontRedirect <- true
 			return false
 		}
 	}
 }
 
-func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request) {
+func errorHandler(client *redis.Client, await map[string]chan bool) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// ext := "html"
 
 		ingressName := r.Header.Get(IngressName)
 		namespace := r.Header.Get(Namespace)
-		redirectTo := r.Header.Get(OriginalURI)
-		redirectRequest := false
+		schema := r.Header.Get(Schema)
+		hostname := r.Header.Get(HostName)
+		uri := r.Header.Get(OriginalURI)
+		origianlURL := fmt.Sprintf("%s://%s%s", schema, hostname, uri)
+		dontRedirect := true
 
-		// logrus.Infof("Redirect to: %s", redirectTo)
-		// logrus.Infof("FormatHeader: %s", r.Header.Get(FormatHeader))
-		// logrus.Infof("CodeHeader: %s", r.Header.Get(CodeHeader))
-		// logrus.Infof("ContentType: %s", r.Header.Get(ContentType))
-		// logrus.Infof("OriginalURI: %s", r.Header.Get(OriginalURI))
-		// logrus.Infof("Namespace: %s", r.Header.Get(Namespace))
-		// logrus.Infof("IngressName: %s", r.Header.Get(IngressName))
-		// logrus.Infof("ServiceName: %s", r.Header.Get(ServiceName))
-		// logrus.Infof("ServicePort: %s", r.Header.Get(ServicePort))
-		// logrus.Infof("Req: %s%s\n", r.Host, r.URL.Path)
-		// if os.Getenv("DEBUG") != "" {
+		logrus.Infof("Original: %s", origianlURL)
 
-		// }
-
-		// format := r.Header.Get(FormatHeader)
-		// if format == "" {
-		// 	format = "text/html"
-		// 	logrus.Infof("format not specified. Using %v", format)
-		// }
-
-		// cext, err := mime.ExtensionsByType(format)
-		// if err != nil {
-		// 	logrus.Infof("unexpected error reading media type extension: %v. Using %v", err, ext)
-		// } else if len(cext) == 0 {
-		// 	logrus.Infof("couldn't get media type extension. Using %v", ext)
-		// } else {
-		// 	ext = cext[0]
-		// }
-		// w.Header().Set(ContentType, format)
-
+		u1 := uuid.NewV4()
+		logrus.Infof("Request ID %v", u1)
 		if ingressName != "" {
 			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
 			if err != nil {
@@ -137,24 +127,47 @@ func errorHandler(client *redis.Client) func(http.ResponseWriter, *http.Request)
 				fmt.Fprint(w, "App is sleeping but we didn't know =/")
 				return
 			}
+			app := fmt.Sprintf("%s/%s", namespace, ingressName)
 			switch val {
 			case "sleeping":
 				err := client.Publish("wakeup", fmt.Sprintf("%s/%s", namespace, ingressName)).Err()
 				if err != nil {
 					logrus.Errorf("Failed to publish wakeup message: %v", err)
 				}
-				redirectRequest = waitForIt(client, namespace, ingressName)
+				if val, ok := await[app]; ok {
+					logrus.Infof("Waiting for redirect %v", u1)
+					dontRedirect = <-val
+					logrus.Infof("Got redirectRequest %v", u1)
+				} else {
+					await[app] = make(chan bool)
+					logrus.Infof("calling waitForIt %v", u1)
+					dontRedirect = waitForIt(client, namespace, ingressName, await[app])
+				}
+
 				// fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
 			case "waking_up":
-				redirectRequest = waitForIt(client, namespace, ingressName)
+				if val, ok := await[app]; ok {
+					logrus.Infof("Waiting for redirect %v", u1)
+					dontRedirect = <-val
+					logrus.Infof("Got redirectRequest %v", u1)
+				} else {
+					await[app] = make(chan bool)
+					logrus.Infof("calling waitForIt %v", u1)
+					dontRedirect = waitForIt(client, namespace, ingressName, await[app])
+				}
 			case "awake":
-				redirectRequest = true
+				logrus.Infof("Already awake, redirect request %v", u1)
+				time.Sleep(500 * time.Millisecond)
+				dontRedirect = false
 			default:
 				fmt.Fprintf(w, "Page not found - 404")
 			}
-			if redirectRequest {
-				logrus.Info("Redirecting request")
-				http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+			if dontRedirect {
+				logrus.Infof("Deleting map key %v", u1)
+				delete(await, app)
+			} else {
+				logrus.Infof("Redirecting request %v", u1)
+				http.Redirect(w, r, origianlURL, http.StatusSeeOther)
 			}
 		}
 		// Not collected by custom error
