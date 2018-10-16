@@ -12,7 +12,6 @@ RUN dep ensure --vendor-only
 ADD . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o /app .
-# RUN CGO_ENABLED=0 go build -o scale
 
 FROM scratch
 

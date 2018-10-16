@@ -3,9 +3,24 @@
 
 [[projects]]
   name = "github.com/go-redis/redis"
-  packages = [".","internal","internal/consistenthash","internal/hashtag","internal/pool","internal/proto","internal/singleflight","internal/util"]
+  packages = [
+    ".",
+    "internal",
+    "internal/consistenthash",
+    "internal/hashtag",
+    "internal/pool",
+    "internal/proto",
+    "internal/singleflight",
+    "internal/util"
+  ]
   revision = "f3bba01df2026fc865f7782948845db9cf44cf23"
   version = "v6.14.1"
+
+[[projects]]
+  name = "github.com/satori/go.uuid"
+  packages = ["."]
+  revision = "f58768cc1a7a7e77a3bd49e98cdd21419399b6a3"
+  version = "v1.2.0"
 
 [[projects]]
   name = "github.com/sirupsen/logrus"
@@ -22,12 +37,15 @@
 [[projects]]
   branch = "master"
   name = "golang.org/x/sys"
-  packages = ["unix","windows"]
+  packages = [
+    "unix",
+    "windows"
+  ]
   revision = "d47a0f3392421c5624713c9a19fe781f651f8a50"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "343bf13cfe3134fc32414e58536fb1695283aba88a7fa4e89a990341b60f0c63"
+  inputs-digest = "d89bfc5025a3be21c3a4cb4b0efcec283f09666ad18c23de4d334751b27f38a3"
   solver-name = "gps-cdcl"
   solver-version = 1

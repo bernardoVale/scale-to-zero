@@ -11,8 +11,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var wakeupChannel, sleepChannel chan string
-
 const (
 	// FormatHeader name of the header used to extract the format
 	FormatHeader = "X-Format"
@@ -52,9 +50,8 @@ const (
 func main() {
 
 	backendHost := flag.String("host", "redis-master:6379", "backend host url")
-	backendPassword := flag.String("password", "npCYPR7uAt", "backend password")
-
-	await := make(map[string]chan bool)
+	backendPassword := flag.String("password", "8yJ5LrGLDq", "backend password")
+	await := newAwakingApps()
 
 	flag.Parse()
 
@@ -64,22 +61,23 @@ func main() {
 		Password: *backendPassword,
 		DB:       0, // use default DB
 	})
+	err := client.Ping().Err()
+	if err != nil {
+		logrus.WithError(err).Panicf("Could not ping backend")
+		panic(err)
+	}
 
 	http.HandleFunc("/", errorHandler(client, await))
-
-	// http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	logrus.Info("Starting app with time sleep")
 	http.ListenAndServe(fmt.Sprintf(":8080"), nil)
-	close(wakeupChannel)
 }
 
-func waitForIt(client *redis.Client, namespace, ingress string, dontRedirect chan<- bool) bool {
-	logrus.Infof("Waiting for awake state of app %s/%s", namespace, ingress)
+func waitForIt(client *redis.Client, namespace, ingress string, await *awakingApps, logger *logrus.Entry) {
+	logger.Infof("Waiting for awake state of app %s/%s", namespace, ingress)
 	timeout := time.After(15 * time.Minute)
 	tick := time.Tick(time.Second * 2)
 	for {
@@ -87,22 +85,21 @@ func waitForIt(client *redis.Client, namespace, ingress string, dontRedirect cha
 		case <-tick:
 			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingress)).Result()
 			if err != nil {
-				logrus.WithError(err).Errorf("Failed to get app status: %v", err)
+				logger.WithError(err).Errorf("Failed to get app status: %v", err)
 			}
 			if val == "awake" {
-				dontRedirect <- false
-				close(dontRedirect)
-				return true
+				close(await.state[fmt.Sprintf("%s/%s", namespace, ingress)].redirect)
+				return
 			}
 		case <-timeout:
-			logrus.Infof("Timeout while waiting for app %s/%s", namespace, ingress)
-			dontRedirect <- true
-			return false
+			logger.Infof("Timeout while waiting for app %s/%s", namespace, ingress)
+			close(await.state[fmt.Sprintf("%s/%s", namespace, ingress)].timeout)
+			return
 		}
 	}
 }
 
-func errorHandler(client *redis.Client, await map[string]chan bool) func(http.ResponseWriter, *http.Request) {
+func errorHandler(client *redis.Client, await *awakingApps) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// ext := "html"
 
@@ -111,13 +108,11 @@ func errorHandler(client *redis.Client, await map[string]chan bool) func(http.Re
 		schema := r.Header.Get(Schema)
 		hostname := r.Header.Get(HostName)
 		uri := r.Header.Get(OriginalURI)
-		origianlURL := fmt.Sprintf("%s://%s%s", schema, hostname, uri)
-		dontRedirect := true
-
-		logrus.Infof("Original: %s", origianlURL)
+		originalURL := fmt.Sprintf("%s://%s%s", schema, hostname, uri)
 
 		u1 := uuid.NewV4()
-		logrus.Infof("Request ID %v", u1)
+		logger := logrus.WithField("id", u1)
+
 		if ingressName != "" {
 			val, err := client.Get(fmt.Sprintf("sleeping:%s:%s", namespace, ingressName)).Result()
 			if err != nil {
@@ -132,42 +127,49 @@ func errorHandler(client *redis.Client, await map[string]chan bool) func(http.Re
 			case "sleeping":
 				err := client.Publish("wakeup", fmt.Sprintf("%s/%s", namespace, ingressName)).Err()
 				if err != nil {
-					logrus.Errorf("Failed to publish wakeup message: %v", err)
+					logger.Errorf("Failed to publish wakeup message: %v", err)
 				}
-				if val, ok := await[app]; ok {
-					logrus.Infof("Waiting for redirect %v", u1)
-					dontRedirect = <-val
-					logrus.Infof("Got redirectRequest %v", u1)
-				} else {
-					await[app] = make(chan bool)
-					logrus.Infof("calling waitForIt %v", u1)
-					dontRedirect = waitForIt(client, namespace, ingressName, await[app])
+				logger.Info("App is sleeping")
+				registered := await.registerApp(app)
+				if registered {
+					logger.Info("Go wait for it")
+					go waitForIt(client, namespace, ingressName, await, logger)
 				}
 
-				// fmt.Fprintf(w, "App %s is sleeping. Don't you worry, we will start it for you. It might take a few minutes...", r.Header.Get(IngressName))
+				select {
+				case <-await.state[app].redirect:
+					logger.Info("Got redirect request")
+					await.delete(app)
+					http.Redirect(w, r, originalURL, http.StatusSeeOther)
+					return
+				case <-await.state[app].timeout:
+					logger.Info("Got timeout")
+					await.delete(app)
+				}
 			case "waking_up":
-				if val, ok := await[app]; ok {
-					logrus.Infof("Waiting for redirect %v", u1)
-					dontRedirect = <-val
-					logrus.Infof("Got redirectRequest %v", u1)
-				} else {
-					await[app] = make(chan bool)
-					logrus.Infof("calling waitForIt %v", u1)
-					dontRedirect = waitForIt(client, namespace, ingressName, await[app])
+				logger.Info("app is waking_up")
+				registered := await.registerApp(app)
+				if registered {
+					logger.Info("Registering on waking_up")
+					go waitForIt(client, namespace, ingressName, await, logger)
+				}
+				select {
+				case <-await.state[app].redirect:
+					logger.Info("Got redirect request")
+					await.delete(app)
+					http.Redirect(w, r, originalURL, http.StatusSeeOther)
+					return
+				case <-await.state[app].timeout:
+					logger.Info("Got timeout")
+					await.delete(app)
 				}
 			case "awake":
-				logrus.Infof("Already awake, redirect request %v", u1)
+				logger.Infof("App is awake, redirecting request")
 				time.Sleep(500 * time.Millisecond)
-				dontRedirect = false
+				http.Redirect(w, r, originalURL, http.StatusSeeOther)
+				return
 			default:
 				fmt.Fprintf(w, "Page not found - 404")
-			}
-			if dontRedirect {
-				logrus.Infof("Deleting map key %v", u1)
-				delete(await, app)
-			} else {
-				logrus.Infof("Redirecting request %v", u1)
-				http.Redirect(w, r, origianlURL, http.StatusSeeOther)
 			}
 		}
 		// Not collected by custom error
@@ -180,5 +182,3 @@ func must(err error) {
 		panic(err)
 	}
 }
-
-func int32Ptr(i int32) *int32 { return &i }
