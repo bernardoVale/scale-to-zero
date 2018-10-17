@@ -40,7 +40,7 @@ const (
 	// the location on disk of files served by the handler.
 	ErrFilesPathVar = "ERROR_FILES_PATH"
 
-	// ServiceName name of the header that contains the host directive in the Ingress
+	//HostName name of the header that contains the host directive in the Ingress
 	HostName = "X-Hostname"
 
 	// Schema name of the header that contains the request schema
